@@ -338,31 +338,108 @@ def create_map(df: gpd.GeoDataFrame, year_cols: list) -> folium.Map:
 
 
 def run_prediction(df: pd.DataFrame, year_cols: list) -> pd.DataFrame:
-    """Jalankan prediksi dengan Random Forest."""
+    """Prediksi kasus DBD tahun 2026 dan 2027 menggunakan Random Forest."""
     if len(year_cols) < 2:
         return df
-    
-    target = sorted(year_cols)[-1]
-    features = sorted(year_cols)[:-1]
-    
-    X = df[features].fillna(0).values
-    y = df[target].fillna(0).values
-    
-    if len(X) < 2:
-        return df
-    
-    model = RandomForestRegressor(
-        n_estimators=100,
-        random_state=42,
-        n_jobs=-1
-    )
-    model.fit(X, y)
-    
+
     df = df.copy()
-    df['prediksi'] = model.predict(X).round(0).astype(int)
-    df['error'] = abs(df[target] - df['prediksi'])
-    
+    sorted_years = sorted(year_cols)
+
+    # --- Prediksi 2026 ---
+    # Gunakan semua tahun historis sebagai fitur, target = tahun terakhir
+    features_1 = sorted_years[:-1]
+    target_1 = sorted_years[-1]
+    X1 = df[features_1].fillna(0).values
+    y1 = df[target_1].fillna(0).values
+
+    if len(X1) < 2:
+        return df
+
+    model1 = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    model1.fit(X1, y1)
+
+    # Untuk prediksi 2026: geser fitur → gunakan tahun ke-2 dst + tahun terakhir
+    features_pred26 = sorted_years[1:]  # e.g. [2024, 2025]
+    X_pred26 = df[features_pred26].fillna(0).values
+    pred_2026 = model1.predict(X_pred26).round(0).astype(int)
+    pred_2026 = np.clip(pred_2026, 0, None)  # tidak boleh negatif
+    df['Prediksi 2026'] = pred_2026
+
+    # --- Prediksi 2027 ---
+    # Geser lagi: gunakan tahun ke-3 dst + prediksi 2026
+    if len(sorted_years) >= 3:
+        features_pred27 = sorted_years[2:] + ['Prediksi 2026']
+    else:
+        features_pred27 = sorted_years[1:] + ['Prediksi 2026']
+    X_pred27 = df[features_pred27].fillna(0).values
+
+    model2 = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    # Train model2 dengan fitur yang satu langkah sebelumnya
+    train_feat2 = sorted_years[1:] + [target_1]  # e.g. [2024, 2025] for model, target 2025
+    # Kita re-train: features=[tahun -2, tahun -1], target=[tahun terakhir]
+    # Lalu predict dengan [tahun -1, prediksi 2026]
+    model2.fit(X1, y1)  # same pattern
+    pred_2027 = model2.predict(X_pred27).round(0).astype(int)
+    pred_2027 = np.clip(pred_2027, 0, None)
+    df['Prediksi 2027'] = pred_2027
+
+    # Error estimasi (validasi pada tahun terakhir yang diketahui)
+    df['prediksi_validasi'] = model1.predict(X1).round(0).astype(int)
+    df['error'] = abs(df[target_1] - df['prediksi_validasi'])
+
+    # Kategori risiko berdasarkan prediksi 2026
+    p26 = df['Prediksi 2026']
+    q1, q2, q3 = p26.quantile([0.25, 0.5, 0.75])
+    conditions = [
+        p26 >= q3,
+        (p26 >= q2) & (p26 < q3),
+        (p26 >= q1) & (p26 < q2),
+        p26 < q1,
+    ]
+    labels = ['🔴 Sangat Tinggi', '🟠 Tinggi', '🟡 Sedang', '🟢 Rendah']
+    df['Risiko'] = np.select(conditions, labels, default='🟢 Rendah')
+
     return df
+
+
+def get_dbd_recommendations(risk_level: str) -> list:
+    """Rekomendasi penyuluhan DBD berdasarkan tingkat risiko."""
+    base = [
+        'Lakukan gerakan 3M Plus: Menguras, Menutup, dan Mendaur ulang barang bekas plus pencegahan gigitan nyamuk',
+        'Aktifkan kader Jumantik (Juru Pemantau Jentik) di setiap RT/RW',
+        'Pasang kelambu atau kawat kasa pada ventilasi rumah',
+        'Gunakan lotion anti nyamuk, terutama pagi dan sore hari',
+    ]
+    sedang = [
+        'Tingkatkan frekuensi fogging (pengasapan) minimal 2 siklus di area terdampak',
+        'Adakan penyuluhan kesehatan rutin di posyandu dan sekolah',
+        'Distribusikan abate/larvasida di tempat penampungan air',
+        'Libatkan PKK dan karang taruna dalam kampanye PSN (Pemberantasan Sarang Nyamuk)',
+    ]
+    tinggi = [
+        'Dirikan posko siaga DBD di puskesmas dan kelurahan',
+        'Lakukan surveilans aktif: kunjungan rumah door-to-door untuk deteksi dini',
+        'Koordinasi dengan Dinas Kesehatan untuk suplai logistik (cairan infus, trombosit)',
+        'Aktifkan Sistem Kewaspadaan Dini dan Respons (SKDR) DBD',
+        'Gencarkan kampanye media sosial dan penyebaran leaflet di wilayah terdampak',
+    ]
+    sangat_tinggi = [
+        'DEKLARASI STATUS KEJADIAN LUAR BIASA (KLB) DBD di wilayah terdampak',
+        'Mobilisasi fogging massal dan abatisasi selektif di seluruh kelurahan',
+        'Siapkan ruang rawat inap darurat di rumah sakit dan puskesmas',
+        'Kerja sama lintas sektor: TNI/Polri, BPBD, dan relawan untuk PSN massal',
+        'Pantau ketat angka kasus harian dan laporkan ke Kemenkes',
+        'Sosialisasi tanda bahaya DBD (demam tinggi >2 hari, mimisan, bintik merah) ke seluruh warga',
+    ]
+
+    if 'Sangat Tinggi' in risk_level:
+        return base + sedang + tinggi + sangat_tinggi
+    elif 'Tinggi' in risk_level:
+        return base + sedang + tinggi
+    elif 'Sedang' in risk_level:
+        return base + sedang
+    else:
+        return base
 
 
 # Main execution
@@ -430,33 +507,116 @@ def main():
                     use_container_width=True
                 )
         
-        # Prediksi
+        # Prediksi 2026 & 2027
         if len(year_cols) > 1:
             st.markdown('---')
-            st.subheader('🤖 Analisis Prediksi Random Forest')
-            
+            st.subheader('🤖 Prediksi Kasus DBD Tahun 2026 & 2027')
+            st.caption('Menggunakan model Random Forest Regressor berdasarkan data historis')
+
             df = run_prediction(df, year_cols)
-            
-            if 'prediksi' in df.columns:
+
+            if 'Prediksi 2026' in df.columns:
                 target = sorted(year_cols)[-1]
-                
-                col1, col2 = st.columns([2, 1])
-                
-                with col1:
-                    display_cols = ['KELURAHAN', target, 'prediksi', 'error']
-                    available_cols = [c for c in display_cols if c in df.columns]
-                    st.dataframe(
-                        df[available_cols].sort_values('prediksi', ascending=False).head(15),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                
-                with col2:
-                    mae = df['error'].mean() if 'error' in df.columns else 0
-                    accuracy = 100 - (mae / df[target].mean() * 100) if df[target].mean() > 0 else 0
-                    
-                    st.metric('Mean Absolute Error', f'{mae:.2f}')
-                    st.metric('Akurasi Estimasi', f'{accuracy:.1f}%')
+
+                # Metrik performa model
+                mae = df['error'].mean() if 'error' in df.columns else 0
+                accuracy = 100 - (mae / df[target].mean() * 100) if df[target].mean() > 0 else 0
+                total_pred_26 = int(df['Prediksi 2026'].sum())
+                total_pred_27 = int(df['Prediksi 2027'].sum())
+                total_actual = int(df[target].fillna(0).sum())
+
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric(f'Total Aktual {target}', f'{total_actual:,}')
+                mc2.metric('Prediksi 2026', f'{total_pred_26:,}',
+                           delta=f'{total_pred_26 - total_actual:+,} dari {target}')
+                mc3.metric('Prediksi 2027', f'{total_pred_27:,}',
+                           delta=f'{total_pred_27 - total_pred_26:+,} dari 2026')
+                mc4.metric('Akurasi Model', f'{accuracy:.1f}%',
+                           help=f'MAE: {mae:.2f}')
+
+                # Tabel prediksi
+                st.markdown('#### 📋 Detail Prediksi per Kelurahan')
+                display_cols = ['KELURAHAN']
+                if 'KECAMATAN' in df.columns:
+                    display_cols.insert(0, 'KECAMATAN')
+                display_cols += [c for c in year_cols] + ['Prediksi 2026', 'Prediksi 2027', 'Risiko']
+                available_cols = [c for c in display_cols if c in df.columns]
+                st.dataframe(
+                    df[available_cols].sort_values('Prediksi 2027', ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=450,
+                )
+
+                # Chart perbandingan tren + prediksi
+                st.markdown('#### 📈 Tren Historis + Prediksi')
+                trend_data = {}
+                for yc in year_cols:
+                    trend_data[str(yc)] = int(df[yc].fillna(0).sum())
+                trend_data['2026 (prediksi)'] = total_pred_26
+                trend_data['2027 (prediksi)'] = total_pred_27
+                trend_df = pd.DataFrame({
+                    'Tahun': list(trend_data.keys()),
+                    'Total Kasus': list(trend_data.values()),
+                })
+                st.bar_chart(trend_df.set_index('Tahun'), use_container_width=True)
+
+                # Top 10 wilayah prediksi tertinggi 2027
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    st.markdown('#### 🔝 Top 10 Prediksi Tertinggi 2026')
+                    top26 = df.nlargest(10, 'Prediksi 2026')[['KELURAHAN', 'Prediksi 2026', 'Risiko']]
+                    st.dataframe(top26, use_container_width=True, hide_index=True)
+                with col_p2:
+                    st.markdown('#### 🔝 Top 10 Prediksi Tertinggi 2027')
+                    top27 = df.nlargest(10, 'Prediksi 2027')[['KELURAHAN', 'Prediksi 2027', 'Risiko']]
+                    st.dataframe(top27, use_container_width=True, hide_index=True)
+
+            # ── Rekomendasi Penyuluhan DBD ──
+            st.markdown('---')
+            st.subheader('💊 Rekomendasi Penyuluhan & Penanggulangan DBD')
+            st.caption('Rekomendasi otomatis berdasarkan tingkat risiko prediksi 2026')
+
+            if 'Risiko' in df.columns:
+                risk_counts = df['Risiko'].value_counts()
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                rc1.metric('🔴 Sangat Tinggi', risk_counts.get('🔴 Sangat Tinggi', 0))
+                rc2.metric('🟠 Tinggi', risk_counts.get('🟠 Tinggi', 0))
+                rc3.metric('🟡 Sedang', risk_counts.get('🟡 Sedang', 0))
+                rc4.metric('🟢 Rendah', risk_counts.get('🟢 Rendah', 0))
+
+                # Rekomendasi per tingkat risiko
+                for level in ['🔴 Sangat Tinggi', '🟠 Tinggi', '🟡 Sedang', '🟢 Rendah']:
+                    level_df = df[df['Risiko'] == level]
+                    if level_df.empty:
+                        continue
+                    with st.expander(f'{level} — {len(level_df)} kelurahan', expanded=('Sangat Tinggi' in level)):
+                        # Daftar kelurahan di level ini
+                        kel_list = ', '.join(level_df['KELURAHAN'].sort_values().tolist())
+                        st.markdown(f'**Kelurahan:** {kel_list}')
+                        st.markdown('**Rekomendasi Tindakan:**')
+                        recs = get_dbd_recommendations(level)
+                        for i, rec in enumerate(recs, 1):
+                            st.markdown(f'{i}. {rec}')
+
+                # Panduan umum
+                st.markdown('---')
+                st.markdown('#### 📚 Panduan Umum Pencegahan DBD')
+                st.info('''
+                **3M Plus — Kunci Utama Pencegahan DBD:**
+                1. **Menguras** tempat penampungan air secara rutin (bak mandi, drum, toren)
+                2. **Menutup** rapat wadah penyimpanan air
+                3. **Mendaur ulang** barang bekas yang berpotensi menjadi genangan air
+
+                **Plus:**
+                - Menaburkan larvasida (abate) pada tempat penampungan air
+                - Memelihara ikan pemakan jentik (ikan cupang, nila)
+                - Menggunakan kelambu saat tidur
+                - Memakai obat nyamuk / lotion anti nyamuk
+                - Menanam tanaman pengusir nyamuk (lavender, serai, zodia)
+                - Mengatur cahaya dan ventilasi rumah yang baik
+                - Gotong royong membersihkan lingkungan setiap minggu (Jumat Bersih / PSN)
+                ''')
     
     # Ringkasan
     st.markdown('---')
@@ -481,13 +641,23 @@ def main():
     if year_cols and len(year_cols) >= 2:
         trend = df[year_cols[-1]].sum() - df[year_cols[-2]].sum()
         trend_text = "meningkat" if trend > 0 else "menurun" if trend < 0 else "stabil"
-        
+
+        pred_summary = ''
+        if 'Prediksi 2026' in df.columns and 'Prediksi 2027' in df.columns:
+            sangat_tinggi = len(df[df['Risiko'].str.contains('Sangat Tinggi', na=False)])
+            pred_summary = f'''
+        - Prediksi total kasus 2026: **{int(df["Prediksi 2026"].sum()):,}** kasus
+        - Prediksi total kasus 2027: **{int(df["Prediksi 2027"].sum()):,}** kasus
+        - Wilayah risiko sangat tinggi: **{sangat_tinggi}** kelurahan
+        - Rekomendasi penyuluhan telah disusun berdasarkan tingkat risiko
+            '''
+
         st.success(f'''
         Dashboard menampilkan sebaran kasus DBD per kelurahan di Kota Tangerang.
-        - Total {total_wilayah} wilayah kelurahan dipantau
-        - Tren kasus {trend_text} sebesar {abs(int(trend))} kasus dari tahun sebelumnya
-        - Analisis prediksi berbasis Random Forest telah dijalankan
-        ''')
+        - Total **{total_wilayah}** wilayah kelurahan dipantau
+        - Tren kasus **{trend_text}** sebesar **{abs(int(trend))}** kasus dari tahun sebelumnya
+        - Analisis prediksi berbasis Random Forest (2026 & 2027) telah dijalankan
+        {pred_summary}''')
     else:
         st.success('Dashboard menampilkan sebaran kasus DBD per kelurahan Kota Tangerang.')
     
