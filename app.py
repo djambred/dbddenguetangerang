@@ -3,9 +3,11 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import folium
+from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 from sklearn.ensemble import RandomForestRegressor
 from pathlib import Path
+import json
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -218,62 +220,120 @@ def create_dummy_data() -> pd.DataFrame:
 
 
 def create_map(df: gpd.GeoDataFrame, year_cols: list) -> folium.Map:
-    """Buat peta Folium dengan choropleth."""
+    """Buat peta Folium dengan choropleth yang menarik."""
     if df.empty or df.geometry.is_empty.all():
-        # Return peta default Tangerang jika tidak ada data
-        return folium.Map(location=[-6.2, 106.63], zoom_start=11, tiles='OpenStreetMap')
-    
+        return folium.Map(location=[-6.2, 106.63], zoom_start=12, tiles='CartoDB positron')
+
     # Hitung center
     centroids = df.geometry.centroid
     center_y = centroids.y.mean()
     center_x = centroids.x.mean()
-    
+
     if pd.isna(center_y) or pd.isna(center_x):
-        center = [-6.2, 106.63]  # Default Tangerang
+        center = [-6.2, 106.63]
     else:
         center = [center_y, center_x]
-    
-    m = folium.Map(location=center, zoom_start=11, tiles='OpenStreetMap')
-    
+
+    m = folium.Map(location=center, zoom_start=12, tiles=None)
+
+    # Multiple tile layers
+    folium.TileLayer('CartoDB positron', name='Light').add_to(m)
+    folium.TileLayer('CartoDB dark_matter', name='Dark').add_to(m)
+    folium.TileLayer('OpenStreetMap', name='OpenStreetMap').add_to(m)
+
     if year_cols:
         value_col = sorted(year_cols)[-1]
-        
-        # Pastikan data valid untuk choropleth
         df_valid = df[df[value_col].notna()].copy()
-        
+
         if not df_valid.empty:
-            folium.Choropleth(
+            vmin = df_valid[value_col].min()
+            vmax = df_valid[value_col].max()
+
+            # Choropleth layer
+            choropleth = folium.Choropleth(
                 geo_data=df_valid.to_json(),
                 data=df_valid,
                 columns=['KELURAHAN', value_col],
                 key_on='feature.properties.KELURAHAN',
                 fill_color='YlOrRd',
-                fill_opacity=0.7,
-                line_opacity=0.5,
-                legend_name=f'Kasus DBD {value_col}',
-                nan_fill_color='white'
+                fill_opacity=0.75,
+                line_opacity=0.4,
+                line_weight=1,
+                legend_name=f'Jumlah Kasus DBD Tahun {value_col}',
+                nan_fill_color='#f0f0f0',
+                highlight=True,
+                name=f'Choropleth {value_col}',
             ).add_to(m)
-    
-    # Tambahkan tooltip
-    tooltip_fields = ['KELURAHAN'] + year_cols if year_cols else ['KELURAHAN']
+
+            # Hilangkan tooltip bawaan choropleth
+            choropleth.geojson.add_child(
+                folium.features.GeoJsonTooltip(fields=[], labels=False)
+            )
+
+    # Build interactive GeoJson overlay with rich tooltip & highlight
+    tooltip_fields = ['KELURAHAN']
+    tooltip_aliases = ['Kelurahan']
+    if 'KECAMATAN' in df.columns:
+        tooltip_fields.insert(0, 'KECAMATAN')
+        tooltip_aliases.insert(0, 'Kecamatan')
+    for yc in sorted(year_cols):
+        tooltip_fields.append(yc)
+        tooltip_aliases.append(f'Kasus {yc}')
+
     available_fields = [f for f in tooltip_fields if f in df.columns]
-    
+    available_aliases = [tooltip_aliases[i] for i, f in enumerate(tooltip_fields) if f in df.columns]
+
     if available_fields:
+        style_fn = lambda x: {
+            'fillOpacity': 0.0,
+            'color': '#333333',
+            'weight': 1.5,
+            'dashArray': '',
+        }
+        highlight_fn = lambda x: {
+            'fillOpacity': 0.4,
+            'fillColor': '#ffff00',
+            'color': '#000000',
+            'weight': 3,
+        }
         folium.GeoJson(
             df,
+            name='Info Kelurahan',
+            style_function=style_fn,
+            highlight_function=highlight_fn,
             tooltip=folium.GeoJsonTooltip(
                 fields=available_fields,
-                aliases=[f.replace('_', ' ').title() for f in available_fields],
-                style="font-size: 12px;"
+                aliases=available_aliases,
+                localize=True,
+                sticky=True,
+                style='''
+                    background-color: rgba(255,255,255,0.95);
+                    border: 2px solid #cc0000;
+                    border-radius: 8px;
+                    box-shadow: 3px 3px 6px rgba(0,0,0,0.3);
+                    font-size: 13px;
+                    padding: 8px 12px;
+                ''',
             ),
-            style_function=lambda x: {
-                'fillOpacity': 0,
-                'color': 'blue',
-                'weight': 1
-            }
         ).add_to(m)
-    
-    folium.LayerControl().add_to(m)
+
+    # Marker kasus tertinggi
+    if year_cols:
+        value_col = sorted(year_cols)[-1]
+        valid = df.dropna(subset=[value_col])
+        if not valid.empty:
+            top = valid.nlargest(1, value_col).iloc[0]
+            pt = top.geometry.centroid
+            folium.Marker(
+                location=[pt.y, pt.x],
+                popup=f"<b>{top['KELURAHAN']}</b><br>Kasus {value_col}: {int(top[value_col])}",
+                icon=folium.Icon(color='red', icon='exclamation-triangle', prefix='fa'),
+                tooltip='Kasus Tertinggi',
+            ).add_to(m)
+
+    # Mini map & controls
+    MiniMap(toggle_display=True, position='bottomleft').add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
     return m
 
 
